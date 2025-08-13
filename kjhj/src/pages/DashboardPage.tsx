@@ -8,6 +8,7 @@ import { supabase } from '../lib/supabase';
 import { SubscriptionStatus } from '../components/SubscriptionStatus';
 import { TrialStatus } from '../components/TrialStatus';
 import { AccountDeletionCountdown } from '../components/AccountDeletionCountdown';
+import { ReturningUserStatus } from '../components/ReturningUserStatus';
 import { Link } from 'react-router-dom';
 import { Crown, Settings, LogOut, ShoppingBag, Zap, Trash2, Shield, AlertTriangle, User } from 'lucide-react';
 
@@ -143,6 +144,13 @@ export function DashboardPage() {
         <div className="mb-8">
           <AccountDeletionCountdown />
         </div>
+
+        {/* Returning User Status */}
+        {user?.email && (
+          <div className="mb-8">
+            <ReturningUserStatus userEmail={user.email} />
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-8">

@@ -89,6 +89,42 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     updated_at timestamptz DEFAULT now()
 );
 
+-- CRITICAL: Account deletion history table - tracks all deleted accounts
+-- This prevents users from getting multiple free trials by re-signing up
+CREATE TABLE IF NOT EXISTS deleted_account_history (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    original_user_id uuid NOT NULL, -- Original user ID before deletion
+    email text NOT NULL, -- Email address (primary identifier)
+    full_name text,
+
+    -- Trial usage tracking
+    trial_used boolean DEFAULT true, -- Did they use their free trial?
+    trial_start_date timestamptz,
+    trial_end_date timestamptz,
+    trial_completed boolean DEFAULT false, -- Did they complete the full trial?
+
+    -- Subscription history
+    ever_subscribed boolean DEFAULT false, -- Did they ever have a paid subscription?
+    last_subscription_status text,
+    subscription_cancelled_date timestamptz,
+
+    -- Deletion tracking
+    account_deleted_at timestamptz DEFAULT now(),
+    deletion_reason text DEFAULT 'trial_expired',
+
+    -- Re-signup prevention
+    can_get_new_trial boolean DEFAULT false, -- Can they get another trial?
+    requires_immediate_subscription boolean DEFAULT true, -- Must subscribe to continue?
+
+    -- Metadata
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+
+    -- Constraints
+    UNIQUE(email), -- One record per email
+    UNIQUE(original_user_id) -- One record per original user
+);
+
 -- Central user account state management
 CREATE TABLE IF NOT EXISTS user_account_state (
     user_id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -186,6 +222,12 @@ CREATE INDEX IF NOT EXISTS idx_user_account_state_stripe_customer ON user_accoun
 CREATE INDEX IF NOT EXISTS idx_user_account_state_access_level ON user_account_state(access_level);
 CREATE INDEX IF NOT EXISTS idx_user_account_state_account_status ON user_account_state(account_status);
 
+-- Deleted account history indexes (CRITICAL for re-signup prevention)
+CREATE INDEX IF NOT EXISTS idx_deleted_account_history_email ON deleted_account_history(email);
+CREATE INDEX IF NOT EXISTS idx_deleted_account_history_original_user_id ON deleted_account_history(original_user_id);
+CREATE INDEX IF NOT EXISTS idx_deleted_account_history_trial_used ON deleted_account_history(trial_used);
+CREATE INDEX IF NOT EXISTS idx_deleted_account_history_requires_subscription ON deleted_account_history(requires_immediate_subscription);
+
 -- User trials indexes
 CREATE INDEX IF NOT EXISTS idx_user_trials_user_id ON user_trials(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_trials_status ON user_trials(trial_status);
@@ -246,6 +288,7 @@ ALTER TABLE user_trials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE stripe_customers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE stripe_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE axie_studio_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deleted_account_history ENABLE ROW LEVEL SECURITY;
 
 -- User profiles policies
 DO $$ 
@@ -323,6 +366,26 @@ BEGIN
     CREATE POLICY "Users can view own axie accounts" ON axie_studio_accounts FOR SELECT USING (auth.uid() = user_id);
     CREATE POLICY "Users can update own axie accounts" ON axie_studio_accounts FOR UPDATE USING (auth.uid() = user_id);
     CREATE POLICY "Users can insert own axie accounts" ON axie_studio_accounts FOR INSERT WITH CHECK (auth.uid() = user_id);
+END $$;
+
+-- Deleted account history policies (Admin only access for security)
+DO $$
+BEGIN
+    DROP POLICY IF EXISTS "Admin can view deleted accounts" ON deleted_account_history;
+    DROP POLICY IF EXISTS "Admin can manage deleted accounts" ON deleted_account_history;
+    DROP POLICY IF EXISTS "System can insert deleted accounts" ON deleted_account_history;
+
+    -- Only super admin can view deleted account history
+    CREATE POLICY "Admin can view deleted accounts" ON deleted_account_history FOR SELECT
+    USING (auth.uid() = 'b8782453-a343-4301-a947-67c5bb407d2b'::uuid);
+
+    -- Only super admin can update deleted account history
+    CREATE POLICY "Admin can manage deleted accounts" ON deleted_account_history FOR UPDATE
+    USING (auth.uid() = 'b8782453-a343-4301-a947-67c5bb407d2b'::uuid);
+
+    -- System functions can insert (for account deletion tracking)
+    CREATE POLICY "System can insert deleted accounts" ON deleted_account_history FOR INSERT
+    WITH CHECK (true); -- Controlled by functions only
 END $$;
 
 -- ============================================================================
@@ -444,6 +507,210 @@ GRANT SELECT ON user_dashboard TO authenticated;
 GRANT SELECT ON stripe_user_subscriptions TO authenticated;
 GRANT SELECT ON user_trial_info TO authenticated;
 GRANT SELECT ON user_access_status TO authenticated;
+
+-- ============================================================================
+-- CRITICAL: ACCOUNT DELETION AND RE-SIGNUP PREVENTION FUNCTIONS
+-- ============================================================================
+
+-- Function to check if email has used trial before (CRITICAL for re-signup prevention)
+CREATE OR REPLACE FUNCTION check_email_trial_history(p_email text)
+RETURNS TABLE(
+    has_used_trial boolean,
+    requires_subscription boolean,
+    ever_subscribed boolean,
+    deletion_reason text,
+    deleted_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        COALESCE(dah.trial_used, false) as has_used_trial,
+        COALESCE(dah.requires_immediate_subscription, false) as requires_subscription,
+        COALESCE(dah.ever_subscribed, false) as ever_subscribed,
+        dah.deletion_reason,
+        dah.account_deleted_at as deleted_at
+    FROM deleted_account_history dah
+    WHERE LOWER(dah.email) = LOWER(p_email)
+    ORDER BY dah.account_deleted_at DESC
+    LIMIT 1;
+END;
+$$;
+
+-- Function to record account deletion (CRITICAL for tracking)
+CREATE OR REPLACE FUNCTION record_account_deletion(
+    p_user_id uuid,
+    p_email text,
+    p_deletion_reason text DEFAULT 'trial_expired'
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_trial_info record;
+    v_subscription_info record;
+BEGIN
+    -- Get trial information
+    SELECT
+        trial_start_date,
+        trial_end_date,
+        trial_status,
+        CASE WHEN trial_end_date <= now() THEN true ELSE false END as trial_completed
+    INTO v_trial_info
+    FROM user_trials
+    WHERE user_id = p_user_id;
+
+    -- Get subscription information
+    SELECT
+        CASE WHEN COUNT(*) > 0 THEN true ELSE false END as ever_subscribed,
+        MAX(status::text) as last_status
+    INTO v_subscription_info
+    FROM stripe_customers sc
+    JOIN stripe_subscriptions ss ON sc.customer_id = ss.customer_id
+    WHERE sc.user_id = p_user_id;
+
+    -- Record in deletion history
+    INSERT INTO deleted_account_history (
+        original_user_id,
+        email,
+        full_name,
+        trial_used,
+        trial_start_date,
+        trial_end_date,
+        trial_completed,
+        ever_subscribed,
+        last_subscription_status,
+        account_deleted_at,
+        deletion_reason,
+        can_get_new_trial,
+        requires_immediate_subscription
+    )
+    VALUES (
+        p_user_id,
+        p_email,
+        (SELECT full_name FROM user_profiles WHERE id = p_user_id),
+        true, -- They used their trial
+        v_trial_info.trial_start_date,
+        v_trial_info.trial_end_date,
+        v_trial_info.trial_completed,
+        COALESCE(v_subscription_info.ever_subscribed, false),
+        v_subscription_info.last_status,
+        now(),
+        p_deletion_reason,
+        false, -- Cannot get new trial
+        true   -- Must subscribe immediately
+    )
+    ON CONFLICT (email) DO UPDATE SET
+        -- Update with latest deletion info
+        account_deleted_at = now(),
+        deletion_reason = p_deletion_reason,
+        updated_at = now();
+
+    RAISE NOTICE 'Account deletion recorded for email: % (User ID: %)', p_email, p_user_id;
+END;
+$$;
+
+-- Function to handle re-signup attempt (CRITICAL for trial prevention)
+CREATE OR REPLACE FUNCTION handle_user_resignup(
+    p_user_id uuid,
+    p_email text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_history record;
+    v_result jsonb;
+BEGIN
+    -- Check deletion history
+    SELECT * INTO v_history
+    FROM deleted_account_history
+    WHERE LOWER(email) = LOWER(p_email)
+    ORDER BY account_deleted_at DESC
+    LIMIT 1;
+
+    IF v_history.id IS NOT NULL THEN
+        -- User has previous account - NO FREE TRIAL
+
+        -- Create account state requiring immediate subscription
+        INSERT INTO user_account_state (
+            user_id,
+            email,
+            full_name,
+            account_status,
+            access_level,
+            has_access,
+            trial_days_remaining,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            p_user_id,
+            p_email,
+            v_history.full_name,
+            'expired', -- Immediately expired
+            'none',    -- No access
+            false,     -- No access
+            0,         -- No trial days
+            now(),
+            now()
+        )
+        ON CONFLICT (user_id) DO UPDATE SET
+            account_status = 'expired',
+            access_level = 'none',
+            has_access = false,
+            trial_days_remaining = 0,
+            updated_at = now();
+
+        -- Create expired trial record
+        INSERT INTO user_trials (
+            user_id,
+            trial_start_date,
+            trial_end_date,
+            trial_status,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            p_user_id,
+            now(),
+            now(), -- Immediately expired
+            'expired',
+            now(),
+            now()
+        )
+        ON CONFLICT (user_id) DO UPDATE SET
+            trial_status = 'expired',
+            trial_end_date = now(),
+            updated_at = now();
+
+        v_result := jsonb_build_object(
+            'is_returning_user', true,
+            'has_used_trial', v_history.trial_used,
+            'requires_subscription', v_history.requires_immediate_subscription,
+            'ever_subscribed', v_history.ever_subscribed,
+            'message', 'Welcome back! Please subscribe to continue using our service.',
+            'trial_allowed', false
+        );
+    ELSE
+        -- New user - allow normal trial
+        v_result := jsonb_build_object(
+            'is_returning_user', false,
+            'has_used_trial', false,
+            'requires_subscription', false,
+            'ever_subscribed', false,
+            'message', 'Welcome! Your 7-day free trial has started.',
+            'trial_allowed', true
+        );
+    END IF;
+
+    RETURN v_result;
+END;
+$$;
 
 -- ============================================================================
 -- BUSINESS LOGIC FUNCTIONS WITH ADMIN PROTECTION
@@ -603,6 +870,56 @@ BEGIN
 END;
 $$;
 
+-- CRITICAL: Function to safely delete user account with history tracking
+CREATE OR REPLACE FUNCTION safely_delete_user_account(p_user_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_email text;
+    v_result jsonb;
+BEGIN
+    -- CRITICAL SAFETY CHECK: NEVER delete super admin
+    IF p_user_id = 'b8782453-a343-4301-a947-67c5bb407d2b'::uuid THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Cannot delete super admin account',
+            'user_id', p_user_id
+        );
+    END IF;
+
+    -- Get user email before deletion
+    SELECT email INTO v_user_email FROM auth.users WHERE id = p_user_id;
+
+    IF v_user_email IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'User not found',
+            'user_id', p_user_id
+        );
+    END IF;
+
+    -- CRITICAL: Record deletion history BEFORE deleting
+    PERFORM record_account_deletion(p_user_id, v_user_email, 'trial_expired');
+
+    -- Now safe to delete user (CASCADE will handle related records)
+    DELETE FROM auth.users WHERE id = p_user_id;
+
+    v_result := jsonb_build_object(
+        'success', true,
+        'message', 'User account safely deleted with history tracking',
+        'user_id', p_user_id,
+        'email', v_user_email,
+        'deleted_at', now()
+    );
+
+    RAISE NOTICE 'User account deleted: % (ID: %)', v_user_email, p_user_id;
+
+    RETURN v_result;
+END;
+$$;
+
 -- Enhanced check_expired_trials function with better safety
 CREATE OR REPLACE FUNCTION check_expired_trials()
 RETURNS void
@@ -704,7 +1021,8 @@ BEGIN
     WHERE table_schema = 'public'
     AND table_name IN (
         'user_profiles', 'user_account_state', 'user_trials',
-        'stripe_customers', 'stripe_subscriptions', 'axie_studio_accounts'
+        'stripe_customers', 'stripe_subscriptions', 'axie_studio_accounts',
+        'deleted_account_history'
     );
 
     -- Check functions
@@ -719,7 +1037,10 @@ BEGIN
         'verify_user_protection', 'create_complete_user_profile',
         'link_axie_studio_account', 'link_stripe_customer',
         'sync_user_state', 'get_system_metrics', 'sync_all_users',
-        'on_auth_user_created_enhanced', 'on_subscription_change'
+        'on_auth_user_created_enhanced', 'on_subscription_change',
+        'check_email_trial_history', 'record_account_deletion',
+        'handle_user_resignup', 'safely_delete_user_account',
+        'restore_account_on_subscription'
     );
 
     -- Check views
@@ -740,14 +1061,14 @@ BEGIN
     -- Build result
     result := jsonb_build_object(
         'tables', jsonb_build_object(
-            'expected', 6,
+            'expected', 7,
             'found', table_count,
-            'status', CASE WHEN table_count = 6 THEN 'OK' ELSE 'MISSING' END
+            'status', CASE WHEN table_count = 7 THEN 'OK' ELSE 'MISSING' END
         ),
         'functions', jsonb_build_object(
-            'expected', 17,
+            'expected', 22,
             'found', function_count,
-            'status', CASE WHEN function_count = 17 THEN 'OK' ELSE 'MISSING' END
+            'status', CASE WHEN function_count = 22 THEN 'OK' ELSE 'MISSING' END
         ),
         'views', jsonb_build_object(
             'expected', 4,
@@ -760,7 +1081,7 @@ BEGIN
             'status', CASE WHEN trigger_count = 6 THEN 'OK' ELSE 'MISSING' END
         ),
         'overall_status', CASE
-            WHEN table_count = 6 AND function_count = 17 AND view_count = 4 AND trigger_count = 8
+            WHEN table_count = 7 AND function_count = 22 AND view_count = 4 AND trigger_count = 8
             THEN 'HEALTHY'
             ELSE 'ISSUES_DETECTED'
         END,
@@ -917,6 +1238,67 @@ BEGIN
 END;
 $$;
 
+-- CRITICAL: Function to restore account access when returning user subscribes
+CREATE OR REPLACE FUNCTION restore_account_on_subscription(
+    p_user_id uuid,
+    p_stripe_customer_id text,
+    p_subscription_id text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_email text;
+    v_result jsonb;
+BEGIN
+    -- Get user email
+    SELECT email INTO v_user_email FROM auth.users WHERE id = p_user_id;
+
+    -- Update user account state to active with subscription
+    UPDATE user_account_state
+    SET
+        account_status = 'active',
+        access_level = 'pro',
+        has_access = true,
+        stripe_customer_id = p_stripe_customer_id,
+        stripe_subscription_id = p_subscription_id,
+        stripe_status = 'active',
+        updated_at = now()
+    WHERE user_id = p_user_id;
+
+    -- Update trial status to converted
+    UPDATE user_trials
+    SET
+        trial_status = 'converted_to_paid',
+        deletion_scheduled_at = NULL,
+        updated_at = now()
+    WHERE user_id = p_user_id;
+
+    -- Update deletion history to mark as subscribed
+    UPDATE deleted_account_history
+    SET
+        ever_subscribed = true,
+        last_subscription_status = 'active',
+        requires_immediate_subscription = false,
+        updated_at = now()
+    WHERE LOWER(email) = LOWER(v_user_email);
+
+    v_result := jsonb_build_object(
+        'success', true,
+        'message', 'Account access restored successfully',
+        'user_id', p_user_id,
+        'email', v_user_email,
+        'access_level', 'pro',
+        'restored_at', now()
+    );
+
+    RAISE NOTICE 'Account access restored for returning user: % (ID: %)', v_user_email, p_user_id;
+
+    RETURN v_result;
+END;
+$$;
+
 -- Comprehensive user state sync function
 CREATE OR REPLACE FUNCTION sync_user_state(p_user_id uuid)
 RETURNS jsonb
@@ -1040,24 +1422,39 @@ $$;
 -- ENHANCED TRIGGERS AND AUTOMATION
 -- ============================================================================
 
--- Enhanced user creation trigger function
+-- Enhanced user creation trigger function with re-signup handling
 CREATE OR REPLACE FUNCTION on_auth_user_created_enhanced()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
+DECLARE
+    v_resignup_result jsonb;
 BEGIN
-    -- Create complete user profile
-    PERFORM create_complete_user_profile(
-        NEW.id,
-        NEW.email,
-        NEW.raw_user_meta_data->>'full_name'
-    );
+    -- CRITICAL: Check if this is a re-signup and handle accordingly
+    SELECT handle_user_resignup(NEW.id, NEW.email) INTO v_resignup_result;
 
-    -- Create trial record
-    INSERT INTO user_trials (user_id, trial_start_date, trial_end_date)
-    VALUES (NEW.id, now(), now() + interval '7 days')
-    ON CONFLICT (user_id) DO NOTHING;
+    -- If it's a returning user, the handle_user_resignup function already set up their account
+    -- If it's a new user, we need to create the normal trial setup
+
+    IF (v_resignup_result->>'trial_allowed')::boolean = true THEN
+        -- New user - create normal trial setup
+        PERFORM create_complete_user_profile(
+            NEW.id,
+            NEW.email,
+            NEW.raw_user_meta_data->>'full_name'
+        );
+
+        -- Create normal trial record
+        INSERT INTO user_trials (user_id, trial_start_date, trial_end_date, trial_status)
+        VALUES (NEW.id, now(), now() + interval '7 days', 'active')
+        ON CONFLICT (user_id) DO NOTHING;
+
+        RAISE NOTICE 'New user created with 7-day trial: %', NEW.email;
+    ELSE
+        -- Returning user - trial already handled by handle_user_resignup
+        RAISE NOTICE 'Returning user detected - no trial granted: %', NEW.email;
+    END IF;
 
     RETURN NEW;
 END;
@@ -1200,13 +1597,18 @@ BEGIN
     • Comprehensive safety checks and user protection
     • Database health monitoring and reporting
     • Trial cleanup with multiple safety layers
+    • 🔥 CRITICAL: Account deletion history tracking
+    • 🔥 CRITICAL: Re-signup prevention system
+    • 🔥 CRITICAL: Trial abuse prevention
+    • 🔥 CRITICAL: Subscription-required restoration
 
-    ✅ Tables Created: 6
-    ✅ Functions Created: 7
+    ✅ Tables Created: 7 (including deleted_account_history)
+    ✅ Functions Created: 22 (including re-signup prevention)
     ✅ Views Created: 4
     ✅ Triggers Created: 6
     ✅ RLS Policies: Enabled
     ✅ Super Admin: Protected
+    ✅ Trial Abuse: PREVENTED
 
     🚀 Your system is ready for production use!
 

@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Eye, EyeOff, Mail, Lock, User, AlertCircle, CheckCircle } from 'lucide-react';
+import { Eye, EyeOff, Mail, Lock, User, AlertCircle, CheckCircle, Clock } from 'lucide-react';
 
 interface AuthFormProps {
   mode: 'login' | 'signup';
@@ -12,7 +12,42 @@ export function AuthForm({ mode, onToggleMode }: AuthFormProps) {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [message, setMessage] = useState<{ type: 'error' | 'success' | 'warning'; text: string } | null>(null);
+  const [isReturningUser, setIsReturningUser] = useState(false);
+  const [checkingEmail, setCheckingEmail] = useState(false);
+
+  // Function to check if email has been used before
+  const checkEmailHistory = async (email: string) => {
+    try {
+      setCheckingEmail(true);
+      const { data, error } = await supabase.rpc('check_email_trial_history', { p_email: email });
+
+      if (error) {
+        console.error('Error checking email history:', error);
+        return false;
+      }
+
+      if (data && data.length > 0) {
+        const history = data[0];
+        if (history.has_used_trial) {
+          setIsReturningUser(true);
+          setMessage({
+            type: 'warning',
+            text: `Welcome back! This email has been used before. You'll need to subscribe to continue using our service.`
+          });
+          return true;
+        }
+      }
+
+      setIsReturningUser(false);
+      return false;
+    } catch (error) {
+      console.error('Error checking email history:', error);
+      return false;
+    } finally {
+      setCheckingEmail(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,6 +56,9 @@ export function AuthForm({ mode, onToggleMode }: AuthFormProps) {
 
     try {
       if (mode === 'signup') {
+        // First check if this email has been used before
+        const isReturning = await checkEmailHistory(email);
+
         const { error } = await supabase.auth.signUp({
           email,
           password,
@@ -55,16 +93,30 @@ export function AuthForm({ mode, onToggleMode }: AuthFormProps) {
 
             if (axieResponse.ok && axieResult.success) {
               console.log('✅ AxieStudio account created:', axieResult);
-              setMessage({
-                type: 'success',
-                text: `Account created successfully! AxieStudio user ID: ${axieResult.user_id}. Check https://axiestudio-axiestudio-ttefi.ondigitalocean.app/admin to verify the account was created.`,
-              });
+              if (isReturning) {
+                setMessage({
+                  type: 'warning',
+                  text: `Welcome back! Your account has been created but you'll need to subscribe to continue using our service. No free trial is available for returning users.`,
+                });
+              } else {
+                setMessage({
+                  type: 'success',
+                  text: `Account created successfully! Your 7-day free trial has started. AxieStudio user ID: ${axieResult.user_id}.`,
+                });
+              }
             } else {
               console.error('❌ AxieStudio account creation failed:', axieResult);
-              setMessage({
-                type: 'success',
-                text: 'Account created successfully! Note: AxieStudio account creation had issues. You can still sign in and start your trial.',
-              });
+              if (isReturning) {
+                setMessage({
+                  type: 'warning',
+                  text: 'Welcome back! Your account has been created but you\'ll need to subscribe to continue. AxieStudio account creation had issues.',
+                });
+              } else {
+                setMessage({
+                  type: 'success',
+                  text: 'Account created successfully! Your 7-day free trial has started. Note: AxieStudio account creation had issues.',
+                });
+              }
             }
           } else {
             console.error('❌ No session available for AxieStudio account creation');
@@ -118,11 +170,15 @@ export function AuthForm({ mode, onToggleMode }: AuthFormProps) {
 
         {message && (
           <div className={`mb-6 p-4 border-2 border-black rounded-none flex items-center gap-3 ${
-            message.type === 'error' 
-              ? 'bg-red-100 text-red-800' 
+            message.type === 'error'
+              ? 'bg-red-100 text-red-800'
+              : message.type === 'warning'
+              ? 'bg-yellow-100 text-yellow-800'
               : 'bg-green-100 text-green-800'
           }`}>
             {message.type === 'error' ? (
+              <AlertCircle className="w-5 h-5 flex-shrink-0" />
+            ) : message.type === 'warning' ? (
               <AlertCircle className="w-5 h-5 flex-shrink-0" />
             ) : (
               <CheckCircle className="w-5 h-5 flex-shrink-0" />
