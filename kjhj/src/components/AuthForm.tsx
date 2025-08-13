@@ -36,9 +36,10 @@ export function AuthForm({ mode, onToggleMode }: AuthFormProps) {
 
         // Create Axie Studio account after successful Supabase signup
         try {
+          console.log('🔄 Creating AxieStudio account...');
           const { data: { session } } = await supabase.auth.getSession();
           if (session) {
-            await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/axie-studio-account`, {
+            const axieResponse = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/axie-studio-account`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -49,15 +50,36 @@ export function AuthForm({ mode, onToggleMode }: AuthFormProps) {
                 password: password
               }),
             });
+
+            const axieResult = await axieResponse.json();
+
+            if (axieResponse.ok && axieResult.success) {
+              console.log('✅ AxieStudio account created:', axieResult);
+              setMessage({
+                type: 'success',
+                text: `Account created successfully! AxieStudio user ID: ${axieResult.user_id}. Check https://axiestudio-axiestudio-ttefi.ondigitalocean.app/admin to verify the account was created.`,
+              });
+            } else {
+              console.error('❌ AxieStudio account creation failed:', axieResult);
+              setMessage({
+                type: 'success',
+                text: 'Account created successfully! Note: AxieStudio account creation had issues. You can still sign in and start your trial.',
+              });
+            }
+          } else {
+            console.error('❌ No session available for AxieStudio account creation');
+            setMessage({
+              type: 'success',
+              text: 'Account created successfully! Note: AxieStudio account will be created on first login.',
+            });
           }
         } catch (axieError) {
-          console.error('Failed to create Axie Studio account:', axieError);
-          // Don't fail the signup if Axie Studio account creation fails
+          console.error('❌ Failed to create Axie Studio account:', axieError);
+          setMessage({
+            type: 'success',
+            text: 'Account created successfully! Note: AxieStudio account creation failed but you can still sign in.',
+          });
         }
-        setMessage({
-          type: 'success',
-          text: 'Account created successfully! You can now sign in and start your 7-day free trial.',
-        });
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email,

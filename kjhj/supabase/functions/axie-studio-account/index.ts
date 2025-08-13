@@ -62,32 +62,93 @@ async function getAxieStudioApiKey(): Promise<string> {
   }
 }
 
-async function createAxieStudioUser(email: string, password: string): Promise<void> {
+async function createAxieStudioUser(email: string, password: string): Promise<any> {
   try {
-    const apiKey = await getAxieStudioApiKey();
-    
-    const response = await fetch(`${AXIESTUDIO_APP_URL}/api/v1/users/?x-api-key=${apiKey}`, {
+    console.log(`🔄 Starting AxieStudio user creation for: ${email}`);
+
+    // Step 1: Login to AxieStudio to get JWT token
+    console.log(`🔐 Logging into AxieStudio...`);
+    const loginResponse = await fetch(`${AXIESTUDIO_APP_URL}/api/v1/login`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey
-      },
-      body: JSON.stringify({
-        username: email,
-        password: password,
-        is_active: true,
-        is_superuser: false
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        username: AXIESTUDIO_USERNAME,
+        password: AXIESTUDIO_PASSWORD
       })
     });
 
-    if (!response.ok) {
-      const errorData = await response.text();
-      throw new Error(`Failed to create Axie Studio user: ${response.status} - ${errorData}`);
+    if (!loginResponse.ok) {
+      throw new Error(`Login failed: ${loginResponse.status}`);
     }
 
-    console.log(`Successfully created Axie Studio user: ${email}`);
+    const { access_token } = await loginResponse.json();
+    console.log(`✅ Login successful, got access token`);
+
+    // Step 2: Create API key using JWT token
+    console.log(`🔑 Creating API key...`);
+    const apiKeyResponse = await fetch(`${AXIESTUDIO_APP_URL}/api/v1/api_key/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${access_token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: 'Account Management API Key'
+      })
+    });
+
+    if (!apiKeyResponse.ok) {
+      throw new Error(`API key creation failed: ${apiKeyResponse.status}`);
+    }
+
+    const { api_key } = await apiKeyResponse.json();
+    console.log(`✅ API key created: ${api_key.substring(0, 10)}...`);
+
+    // Step 3: Create the actual user
+    console.log(`👤 Creating user account...`);
+    const userData = {
+      username: email,
+      password: password,
+      is_active: true,
+      is_superuser: false
+    };
+
+    console.log(`📤 Sending user data:`, { ...userData, password: '[REDACTED]' });
+
+    const userResponse = await fetch(`${AXIESTUDIO_APP_URL}/api/v1/users/?x-api-key=${api_key}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': api_key
+      },
+      body: JSON.stringify(userData)
+    });
+
+    console.log(`📥 User creation response status: ${userResponse.status}`);
+
+    const responseText = await userResponse.text();
+    console.log(`📥 User creation response body: ${responseText}`);
+
+    if (!userResponse.ok) {
+      throw new Error(`Failed to create Axie Studio user: ${userResponse.status} - ${responseText}`);
+    }
+
+    let responseData;
+    try {
+      responseData = JSON.parse(responseText);
+    } catch {
+      responseData = responseText;
+    }
+
+    console.log(`✅ Successfully created Axie Studio user: ${email}`);
+    return {
+      success: true,
+      user_id: responseData.id || responseData.user_id || 'unknown',
+      email: email,
+      response_data: responseData
+    };
   } catch (error) {
-    console.error('Error creating Axie Studio user:', error);
+    console.error('❌ Error creating Axie Studio user:', error);
     throw error;
   }
 }
@@ -162,10 +223,14 @@ Deno.serve(async (req) => {
         );
       }
 
-      await createAxieStudioUser(user.email!, password);
-      
+      const result = await createAxieStudioUser(user.email!, password);
+
       return new Response(
-        JSON.stringify({ success: true, message: 'Axie Studio account created successfully' }),
+        JSON.stringify({
+          success: true,
+          message: 'Axie Studio account created successfully',
+          ...result
+        }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }

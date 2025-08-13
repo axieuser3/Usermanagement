@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS stripe_subscriptions (
   status stripe_subscription_status not null,
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now(),
-  deleted_at timestamp with time zone default null
+  deleted_at timestamp with time zone default null,
+  CONSTRAINT fk_stripe_subscriptions_customer_id
+    FOREIGN KEY (customer_id) REFERENCES stripe_customers(customer_id) ON DELETE CASCADE
 );
 
 -- Create stripe_orders table
@@ -306,6 +308,8 @@ BEGIN
     WHERE
         trial_end_date < now()
         AND trial_status = 'active'
+        -- CRITICAL SAFETY CHECK: NEVER expire super admin account
+        AND user_id != 'b8782453-a343-4301-a947-67c5bb407d2b'::uuid
         AND user_id NOT IN (
             SELECT DISTINCT c.user_id
             FROM stripe_customers c
@@ -324,6 +328,8 @@ BEGIN
     WHERE
         trial_status = 'expired'
         AND deletion_scheduled_at < now()
+        -- CRITICAL SAFETY CHECK: NEVER schedule super admin for deletion
+        AND user_id != 'b8782453-a343-4301-a947-67c5bb407d2b'::uuid
         AND user_id NOT IN (
             SELECT DISTINCT c.user_id
             FROM stripe_customers c
@@ -414,6 +420,8 @@ BEGIN
     FROM user_trials ut
     JOIN auth.users au ON ut.user_id = au.id
     WHERE ut.trial_status = 'scheduled_for_deletion'
+    -- CRITICAL SAFETY CHECK: NEVER delete super admin account
+    AND ut.user_id != 'b8782453-a343-4301-a947-67c5bb407d2b'::uuid
     -- SAFETY CHECK: Ensure no active subscription exists
     AND ut.user_id NOT IN (
         SELECT DISTINCT c.user_id

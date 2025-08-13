@@ -150,14 +150,22 @@ Deno.serve(async (req) => {
 
     // Step 5: Final safety check before deletion
     const safeUsersToDelete = [];
+    const SUPER_ADMIN_ID = 'b8782453-a343-4301-a947-67c5bb407d2b';
+
     for (const userToDelete of usersToDelete || []) {
+      // CRITICAL SAFETY CHECK: NEVER delete super admin account
+      if (userToDelete.user_id === SUPER_ADMIN_ID) {
+        console.log(`CRITICAL SAFETY: Skipping deletion of SUPER ADMIN ${userToDelete.email} - PROTECTED ACCOUNT`);
+        continue;
+      }
+
       // Double-check that user doesn't have active subscription
       const { data: subscriptionCheck } = await supabase
         .from('stripe_user_subscriptions')
         .select('subscription_status')
         .eq('customer_id', userToDelete.user_id)
         .single();
-        
+
       if (!subscriptionCheck || !['active', 'trialing'].includes(subscriptionCheck.subscription_status)) {
         safeUsersToDelete.push(userToDelete);
       } else {

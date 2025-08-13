@@ -1,12 +1,15 @@
 import React from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useUserAccess } from '../hooks/useUserAccess';
-import { useEnterpriseUser } from '../hooks/useEnterpriseUser';
+import { isSuperAdmin } from '../utils/adminAuth';
+
 import { supabase } from '../lib/supabase';
+
 import { SubscriptionStatus } from '../components/SubscriptionStatus';
 import { TrialStatus } from '../components/TrialStatus';
+import { AccountDeletionCountdown } from '../components/AccountDeletionCountdown';
 import { Link } from 'react-router-dom';
-import { Crown, Settings, LogOut, ShoppingBag, Zap, Trash2, Shield, AlertTriangle } from 'lucide-react';
+import { Crown, Settings, LogOut, ShoppingBag, Zap, Trash2, Shield, AlertTriangle, User } from 'lucide-react';
 
 export function DashboardPage() {
   const { user, signOut } = useAuth();
@@ -19,12 +22,12 @@ export function DashboardPage() {
     isProtected
   } = useUserAccess();
 
-  // Enterprise features (optional - won't break if not available)
-  const {
-    enterpriseState,
-    isEnterpriseEnabled,
-    syncUserState
-  } = useEnterpriseUser();
+  // Check if current user is super admin
+  const isAdmin = isSuperAdmin(user?.id);
+
+
+
+
 
   const handleDeleteAccount = async () => {
     if (isProtected) {
@@ -56,9 +59,7 @@ export function DashboardPage() {
     await signOut();
   };
 
-  const handleSignOut = async () => {
-    await signOut();
-  };
+
 
   return (
     <div className="min-h-screen bg-white">
@@ -80,9 +81,41 @@ export function DashboardPage() {
             <div className="flex items-center gap-6">
               <span className="text-sm text-gray-600 font-medium uppercase tracking-wide">
                 {user?.email}
+                {isAdmin && (
+                  <span className="ml-2 bg-red-600 text-white px-2 py-1 text-xs rounded-none font-bold">
+                    SUPER ADMIN
+                  </span>
+                )}
               </span>
+
+              {isAdmin && (
+                <Link
+                  to="/admin"
+                  className="flex items-center gap-2 bg-red-600 text-white px-3 py-2 rounded-none font-bold hover:bg-red-700 transition-colors uppercase tracking-wide text-xs"
+                >
+                  <Settings className="w-4 h-4" />
+                  ADMIN PANEL
+                </Link>
+              )}
+
+              <Link
+                to="/account"
+                className="flex items-center gap-2 bg-gray-600 text-white px-3 py-2 rounded-none font-bold hover:bg-gray-700 transition-colors uppercase tracking-wide text-xs"
+              >
+                <Settings className="w-4 h-4" />
+                ACCOUNT
+              </Link>
+
+              <Link
+                to="/products"
+                className="flex items-center gap-2 bg-black text-white px-3 py-2 rounded-none font-bold hover:bg-gray-800 transition-colors uppercase tracking-wide text-xs"
+              >
+                <ShoppingBag className="w-4 h-4" />
+                PRODUCTS
+              </Link>
+
               <button
-                onClick={handleSignOut}
+                onClick={signOut}
                 className="flex items-center gap-2 text-black hover:text-gray-600 transition-colors font-medium uppercase tracking-wide"
               >
                 <LogOut className="w-4 h-4" />
@@ -104,6 +137,11 @@ export function DashboardPage() {
               : 'Start your 7-day free trial to access advanced AI workflow capabilities.'
             }
           </p>
+        </div>
+
+        {/* Account Deletion Countdown */}
+        <div className="mb-8">
+          <AccountDeletionCountdown />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -172,19 +210,34 @@ export function DashboardPage() {
                     <p className="text-sm text-gray-600">Upgrade or change plan</p>
                   </div>
                 </Link>
-                
+
                 <Link
-                  to="/test"
+                  to="/account"
                   className="flex items-center gap-4 p-6 border-2 border-black rounded-none hover:bg-gray-50 transition-all hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-x-[-2px] hover:translate-y-[-2px]"
                 >
                   <div className="w-12 h-12 bg-black text-white flex items-center justify-center rounded-none">
-                    <Settings className="w-6 h-6" />
+                    <User className="w-6 h-6" />
                   </div>
                   <div>
-                    <h4 className="font-bold text-black uppercase tracking-wide">TEST CONNECTIONS</h4>
-                    <p className="text-sm text-gray-600">Test integrations</p>
+                    <h4 className="font-bold text-black uppercase tracking-wide">ACCOUNT SETTINGS</h4>
+                    <p className="text-sm text-gray-600">Manage your account</p>
                   </div>
                 </Link>
+
+                {isAdmin && (
+                  <Link
+                    to="/test"
+                    className="flex items-center gap-4 p-6 border-2 border-red-600 rounded-none hover:bg-red-50 transition-all hover:shadow-[4px_4px_0px_0px_rgba(220,38,38,1)] hover:translate-x-[-2px] hover:translate-y-[-2px]"
+                  >
+                    <div className="w-12 h-12 bg-red-600 text-white flex items-center justify-center rounded-none">
+                      <Settings className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-black uppercase tracking-wide">ADMIN TESTING</h4>
+                      <p className="text-sm text-gray-600">Test system integrations</p>
+                    </div>
+                  </Link>
+                )}
                 
                 {hasAccess && (
                   <a
@@ -326,54 +379,7 @@ export function DashboardPage() {
               </button>
             </div>
 
-            {/* Enterprise Info Section - Only shows if enterprise features are available */}
-            {isEnterpriseEnabled && enterpriseState && (
-              <div className="bg-white border-2 border-black rounded-none shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] p-8">
-                <div className="flex items-center justify-between mb-6">
-                  <h3 className="text-xl font-bold text-black uppercase tracking-wide">
-                    🏢 ENTERPRISE STATUS
-                  </h3>
-                  <button
-                    onClick={syncUserState}
-                    className="bg-blue-600 text-white px-4 py-2 rounded-none font-bold hover:bg-blue-700 text-sm"
-                  >
-                    🔄 SYNC
-                  </button>
-                </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-4 border border-gray-200 rounded-none">
-                    <p className="text-sm text-gray-600 uppercase tracking-wide">Account Status</p>
-                    <p className="font-bold text-black">{enterpriseState.account_status}</p>
-                  </div>
-
-                  <div className="p-4 border border-gray-200 rounded-none">
-                    <p className="text-sm text-gray-600 uppercase tracking-wide">Access Level</p>
-                    <p className="font-bold text-black">{enterpriseState.access_level}</p>
-                  </div>
-
-                  {enterpriseState.stripe_customer_id && (
-                    <div className="p-4 border border-gray-200 rounded-none">
-                      <p className="text-sm text-gray-600 uppercase tracking-wide">Stripe Status</p>
-                      <p className="font-bold text-black">{enterpriseState.stripe_status || 'Connected'}</p>
-                    </div>
-                  )}
-
-                  {enterpriseState.axie_studio_user_id && (
-                    <div className="p-4 border border-gray-200 rounded-none">
-                      <p className="text-sm text-gray-600 uppercase tracking-wide">Axie Studio</p>
-                      <p className="font-bold text-black">{enterpriseState.axie_studio_status || 'Connected'}</p>
-                    </div>
-                  )}
-                </div>
-
-                <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-none">
-                  <p className="text-blue-800 text-sm">
-                    ✨ Enterprise features are active! Enhanced user management and monitoring available.
-                  </p>
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </main>

@@ -5,7 +5,10 @@ import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { SuccessPage } from './pages/SuccessPage';
-import { TestConnectionsPage } from './pages/TestConnectionsPage';
+import { AdminPage } from './pages/AdminPage';
+import { TestPage } from './pages/TestPage';
+import { UserManagementPage } from './pages/UserManagementPage';
+import { isSuperAdmin } from './utils/adminAuth';
 import { Loader2 } from 'lucide-react';
 
 function App() {
@@ -37,13 +40,21 @@ function App() {
           path="/products" 
           element={user ? <ProductsPage /> : <Navigate to="/login" replace />} 
         />
-        <Route 
-          path="/test" 
-          element={user ? <TestConnectionsPage /> : <Navigate to="/login" replace />} 
+        <Route
+          path="/admin"
+          element={user && isSuperAdmin(user.id) ? <AdminPage /> : <Navigate to="/" replace />}
         />
-        <Route 
-          path="/" 
-          element={user ? <DashboardPage /> : <Navigate to="/login" replace />} 
+        <Route
+          path="/test"
+          element={user && isSuperAdmin(user.id) ? <TestPage /> : <Navigate to="/" replace />}
+        />
+        <Route
+          path="/account"
+          element={user ? <UserManagementPage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/"
+          element={user ? <DashboardPage /> : <Navigate to="/login" replace />}
         />
       </Routes>
     </Router>

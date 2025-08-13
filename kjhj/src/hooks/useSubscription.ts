@@ -66,22 +66,10 @@ export function useSubscription() {
 
         console.log('⚠️ stripe_user_subscriptions view failed, trying base tables:', fetchError);
 
-        // Fallback: Query base tables directly
+        // Fallback: Query base tables directly with manual join
         const { data: customerData, error: customerError } = await supabase
           .from('stripe_customers')
-          .select(`
-            customer_id,
-            stripe_subscriptions (
-              subscription_id,
-              status,
-              price_id,
-              current_period_start,
-              current_period_end,
-              cancel_at_period_end,
-              payment_method_brand,
-              payment_method_last4
-            )
-          `)
+          .select('customer_id')
           .eq('user_id', user.id)
           .is('deleted_at', null)
           .maybeSingle();
@@ -90,18 +78,29 @@ export function useSubscription() {
           throw customerError;
         }
 
-        if (customerData?.stripe_subscriptions?.[0]) {
-          const subscriptionData = customerData.stripe_subscriptions[0];
-          const enrichedData = {
+        if (customerData) {
+          // Now query subscription separately to avoid relationship issues
+          const { data: subscriptionData, error: subscriptionError } = await supabase
+            .from('stripe_subscriptions')
+            .select('*')
+            .eq('customer_id', customerData.customer_id)
+            .is('deleted_at', null)
+            .maybeSingle();
+
+          if (subscriptionError) {
+            console.warn('Subscription query failed:', subscriptionError);
+          }
+
+          const enrichedData: UserSubscription = {
             customer_id: customerData.customer_id,
-            subscription_id: subscriptionData.subscription_id,
-            subscription_status: subscriptionData.status,
-            price_id: subscriptionData.price_id,
-            current_period_start: subscriptionData.current_period_start,
-            current_period_end: subscriptionData.current_period_end,
-            cancel_at_period_end: subscriptionData.cancel_at_period_end,
-            payment_method_brand: subscriptionData.payment_method_brand,
-            payment_method_last4: subscriptionData.payment_method_last4
+            subscription_id: subscriptionData?.subscription_id || null,
+            subscription_status: subscriptionData?.status || 'not_started',
+            price_id: subscriptionData?.price_id || null,
+            current_period_start: subscriptionData?.current_period_start || null,
+            current_period_end: subscriptionData?.current_period_end || null,
+            cancel_at_period_end: subscriptionData?.cancel_at_period_end || false,
+            payment_method_brand: subscriptionData?.payment_method_brand || null,
+            payment_method_last4: subscriptionData?.payment_method_last4 || null,
           };
 
           // Add product name if we have a price_id
@@ -123,6 +122,8 @@ export function useSubscription() {
             }
           }
         } else {
+          console.log('ℹ️ No customer found for user');
+          setSubscription(null);
           console.log('ℹ️ No subscription found for user');
           setSubscription(null);
         }
